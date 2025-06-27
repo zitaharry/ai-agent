@@ -4,6 +4,7 @@ import { UserButton } from "@clerk/nextjs";
 import { Button } from "@/components/ui/button";
 import { HamburgerMenuIcon } from "@radix-ui/react-icons";
 import { useNavigation } from "@/lib/context/navigation";
+import { ModeToggle } from "@/components/mode-toggle";
 
 const Header = () => {
   const { setIsMobileNavOpen } = useNavigation();
