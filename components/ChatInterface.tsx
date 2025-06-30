@@ -1,20 +1,25 @@
 "use client";
 
+import { useEffect, useRef, useState } from "react";
 import { Doc, Id } from "@/convex/_generated/dataModel";
-import { FormEvent, useEffect, useRef, useState } from "react";
-import WelcomeMessage from "@/components/WelcomeMessage";
-import MessageBubble from "@/components/MessageBubble";
 import { Button } from "@/components/ui/button";
-import { ArrowRight } from "lucide-react";
-import { ChatRequestBody } from "@/lib/types";
+import { ChatRequestBody, StreamMessageType } from "@/lib/types";
+import WelcomeMessage from "@/components/WelcomeMessage";
 import { createSSEParser } from "@/lib/SSEParser";
+import MessageBubble from "@/components/MessageBubble";
+import { ArrowRight } from "lucide-react";
+import { getConvexClient } from "@/lib/convex";
+import { api } from "@/convex/_generated/api";
 
 interface ChatInterfaceProps {
   chatId: Id<"chats">;
   initialMessages: Doc<"messages">[];
 }
 
-const ChatInterface = ({ chatId, initialMessages }: ChatInterfaceProps) => {
+export default function ChatInterface({
+  chatId,
+  initialMessages,
+}: ChatInterfaceProps) {
   const [messages, setMessages] = useState<Doc<"messages">[]>(initialMessages);
   const [input, setInput] = useState("");
   const [isLoading, setIsLoading] = useState(false);
@@ -75,7 +80,7 @@ const ChatInterface = ({ chatId, initialMessages }: ChatInterfaceProps) => {
     }
   };
 
-  const handleSubmit = async (e: FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const trimmedInput = input.trim();
     if (!trimmedInput || isLoading) return;
@@ -124,6 +129,91 @@ const ChatInterface = ({ chatId, initialMessages }: ChatInterfaceProps) => {
       // Create SSE parser and stream reader
       const parser = createSSEParser();
       const reader = response.body.getReader();
+
+      // Process the stream chunks
+      await processStream(reader, async (chunk) => {
+        // Parse SSE messages from the chunk
+        const messages = parser.parse(chunk);
+
+        // Handle each message based on its type
+        for (const message of messages) {
+          switch (message.type) {
+            case StreamMessageType.Token:
+              // Handle streaming tokens (normal text response)
+              if ("token" in message) {
+                fullResponse += message.token;
+                setStreamedResponse(fullResponse);
+              }
+              break;
+
+            case StreamMessageType.ToolStart:
+              // Handle start of tool execution (e.g. API calls, file operations)
+              if ("tool" in message) {
+                setCurrentTool({
+                  name: message.tool,
+                  input: message.input,
+                });
+                fullResponse += formatTerminalOutput(
+                  message.tool,
+                  message.input,
+                  "Processing...",
+                );
+                setStreamedResponse(fullResponse);
+              }
+              break;
+
+            case StreamMessageType.ToolEnd:
+              // Handle completion of tool execution
+              if ("tool" in message && currentTool) {
+                // Replace the "Processing..." message with actual output
+                const lastTerminalIndex = fullResponse.lastIndexOf(
+                  '<div class="bg-[#1e1e1e]',
+                );
+                if (lastTerminalIndex !== -1) {
+                  fullResponse =
+                    fullResponse.substring(0, lastTerminalIndex) +
+                    formatTerminalOutput(
+                      message.tool,
+                      currentTool.input,
+                      message.output,
+                    );
+                  setStreamedResponse(fullResponse);
+                }
+                setCurrentTool(null);
+              }
+              break;
+
+            case StreamMessageType.Error:
+              // Handle error messages from the stream
+              if ("error" in message) {
+                throw new Error(message.error);
+              }
+              break;
+
+            case StreamMessageType.Done:
+              // Handle completion of the entire response
+              const assistantMessage: Doc<"messages"> = {
+                _id: `temp_assistant_${Date.now()}`,
+                chatId,
+                content: fullResponse,
+                role: "assistant",
+                createdAt: Date.now(),
+              } as Doc<"messages">;
+
+              // Save the complete message to the database
+              const convex = getConvexClient();
+              await convex.mutation(api.messages.store, {
+                chatId,
+                content: fullResponse,
+                role: "assistant",
+              });
+
+              setMessages((prev) => [...prev, assistantMessage]);
+              setStreamedResponse("");
+              return;
+          }
+        }
+      });
     } catch (error) {
       // Handle any errors during streaming
       console.error("Error sending message:", error);
@@ -145,7 +235,7 @@ const ChatInterface = ({ chatId, initialMessages }: ChatInterfaceProps) => {
 
   return (
     <main className="flex flex-col h-[calc(100vh-theme(spacing.14))]">
-      {/*  Messages container */}
+      {/* Messages container */}
       <section className="flex-1 overflow-y-auto bg-gray-50 p-2 md:p-0">
         <div className="max-w-4xl mx-auto p-4 space-y-3">
           {messages?.length === 0 && <WelcomeMessage />}
@@ -208,5 +298,4 @@ const ChatInterface = ({ chatId, initialMessages }: ChatInterfaceProps) => {
       </footer>
     </main>
   );
-};
-export default ChatInterface;
+}
